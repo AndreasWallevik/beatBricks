@@ -5,10 +5,16 @@ import { CSS } from "@dnd-kit/utilities";
 import confetti from "canvas-confetti";
 import "./index.css";
 
+// COMPONENTS
+import GamifiedProgress from "./components/GamifiedProgress";
+import PixelHouse from "./components/PixelHouse";
+
+
 // AUTH
 import { auth, db, provider } from "./lib/firebase";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, serverTimestamp, query, orderBy } from "firebase/firestore";
+
 
 
 // BeatBricks – Music Project Board
@@ -235,18 +241,14 @@ function Brick({ p, user, onOpen, onToggleTask, onDelete, onClone, onColor }){
   const stop=useCallback(e=>e.stopPropagation(),[]);
   const visibleTasks = useMemo(()=>{ const undone=(p.tasks||[]).filter(t=>!t.done); const done=(p.tasks||[]).filter(t=>t.done); return [...undone,...done].slice(0,4); },[p.tasks]);
   
-  {p.label && (
-    <div className="absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded-full bg-black/40">
-      {p.label}
-    </div>
-  )}
+
 
   return (
     <div 
       onClick={()=>onOpen(p.id)} 
       className="relative aspect-square rounded-2xl shadow-lg text-white overflow-hidden cursor-pointer transition-transform hover:-translate-y-0.5 hover:shadow-2xl bg-slate-900"
       style={{
-        boxShadow: p.accent ? `inset 0 0 0 3px ${p.accent}` : undefined
+        border: (p.accent && p.accent !==  "#00000000") ? `3px solid ${p.accent}` : undefined
       }}
     >
       <div className="pointer-events-none absolute inset-0" style={{background:`linear-gradient(135deg, ${c1}aa, ${c2}ff)`}}/>
@@ -254,7 +256,24 @@ function Brick({ p, user, onOpen, onToggleTask, onDelete, onClone, onColor }){
         "radial-gradient(circle at 20% 20%, #ffffff22 2px, transparent 2px),"+
         "radial-gradient(circle at 80% 30%, #ffffff11 1px, transparent 1px),"+
         "radial-gradient(circle at 40% 80%, #ffffff22 2px, transparent 2px)"}}/>
+
+      {p.label && (
+        <div className="absolute top-2 right-2 text-xs md:text-sm font-semibold px-3 py-1 rounded-full bg-black/50 backdrop-blur-sm border border-white/20 shadow">
+          {p.label}
+        </div>
+      )}
+
+
       <div className="absolute inset-0 p-3 flex flex-col">
+        {/* Done overlay */}
+        {allDone && (
+          <div className="absolute inset-0 bg-emerald-600/60 flex items-center justify-center z-10">
+            <span className="text-white text-lg font-bold rotate-[-15deg] border-4 border-white px-3 py-1 rounded-lg shadow-lg">
+              COMPLETED
+            </span>
+          </div>
+        )}
+
         {/* Header with space for title */}
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-2xl">{p.emoji}</span>
@@ -480,18 +499,48 @@ export default function App(){
     const arr = q
       ? projects.filter(p => [p.name, p.type, p.note].join(" ").toLowerCase().includes(q))
       : projects;
+
     if (sortMode === "priority") {
       // Priority first (high→low), then stable by order
-      return arr.slice().sort((a,b) => (b.priority ?? 0) - (a.priority ?? 0) || (a.order ?? 0) - (b.order ?? 0));
+      return arr.slice().sort(
+        (a,b) => (b.priority ?? 0) - (a.priority ?? 0) || (a.order ?? 0) - (b.order ?? 0)
+      );
     }
-    // Manual mode
+
+    // CompletedFirst
+    if (sortMode =="doneFirst") {
+      return arr.slice().sort(
+        (a,b) => Number(isDone(b)) - Number(isDone(a)) || (a.order ?? 0) - (b.order ?? 0)
+      );
+    }
+
+    // Uncompleted first
+    if (sortMode === "todoFirst") {
+      return arr.slice().sort(
+        (a,b) => Number(isDone(a)) - Number(isDone(b)) || (a.order ?? 0) - (b.order ?? 0)
+      );
+    }
+
+      // Manual mode
     return arr.slice().sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
   }, [projects, query, sortMode]);
+
+  function isDone(p) {
+    return (p.tasks?.length ?? 0) > 0 && (p.tasks || []).every(t => t.done);
+  }
+
 
   // >>> ADD THIS
   const filteredIds = useMemo(() => filtered.map(p => p.id), [filtered]);
   const xp = useMemo(() => calcXP(projects), [projects]);
   // <<< ADD THIS
+  
+  const houseBricks = useMemo(() =>
+    projects.flatMap(p =>
+      (p.tasks || [])
+        .filter(t => t.done)
+        .map(() => (p.accent && p.accent !== "#00000000") ? p.accent : p.color)
+    ), [projects]);
 
     // ✅ BUILD GROUPS FOR RENDERING (VISUAL SECTIONS)
   const groups = useMemo(() => {
@@ -623,6 +672,8 @@ export default function App(){
           >
             <option value="order">Manual order</option>
             <option value="priority">Priority</option>
+            <option value="todoFirst">Uncompleted first</option>
+            <option value="doneFirst">Completed first</option>
           </select>
 
 
@@ -721,6 +772,17 @@ export default function App(){
                 <div className="h-full bg-slate-800" style={{ width: `${xp.pct}%` }} />
               </div>
             </div>
+
+
+          
+        <PixelHouse
+          pct={xp.pct}                // 0–100 within current level
+          size={200}
+          label={`Level ${xp.level} • ${xp.xp} XP`}
+          bricks={houseBricks}
+          maxSlots={120}
+        />
+
 
           {/* Bricks Grid */}
           <div className="mt-6">
