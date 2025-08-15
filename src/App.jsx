@@ -15,6 +15,13 @@ import { collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, serverTimest
 // Fix: clipboard permission errors are now safely caught with graceful fallbacks.
 // Extras: immutable updates in editor, debounced save, tighter memoization, self-tests.
 
+// ✅ FIX: REMOVE UNDEFINED KEYS SO UPDATE DOESN'T NUKE FIELDS
+function pruneUndefined(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) if (v !== undefined) out[k] = v;
+  return out;
+}
+
 const STORAGE_KEY = "beatbricks.v2";
 const SUGGESTED = ["Draft","Write lyrics","Polish lyrics","Record vocals","Mix","Master"]; 
 const COLORS = ["#7c3aed","#10b981","#f59e0b","#ef4444","#06b6d4","#22c55e","#eab308","#f97316"]; 
@@ -91,12 +98,13 @@ function useFirebaseState() {
   // live projects
   useEffect(() => {
     if (!user) { setProjects([]); return; }
-    const q = query(collection(db, `users/${user.uid}/projects`), orderBy("priority","desc"));
+    const q = query(collection(db, `users/${user.uid}/projects`), orderBy("order","asc"));
     return onSnapshot(q, snap => setProjects(snap.docs.map(d => d.data())));
   }, [user]);
 
   // --- CRUD (each function is top-level; none are nested inside another) ---
 
+  // ✅ FIX: NEW PROJECT GETS AN ORDER INDEX; PRIORITY STAYS (0–3)
   const addProject = useCallback(async () => {
     if (!user) return;
     const p = {
@@ -105,15 +113,19 @@ function useFirebaseState() {
       type: "", note: "",
       emoji: "🎧",
       color: "#7c3aed",
-      priority: 2,
-      path: "",
+      accent: "#00000000", // transparent by default
+      label: "",           // optional tag (shown if present)
+      group: "",           // optional “project group”
+      priority: 2,            // 0 None, 1 Low, 2 Med, 3 High
+      order: projects.length, // 👈 used for manual sort
+      //path: "",
       links: [],
       tasks: [],
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
     await setDoc(doc(db, `users/${user.uid}/projects/${p.id}`), p);
-  }, [user]);
+  }, [user, projects.length]);
 
   const cloneProject = useCallback(async (id) => {
     if (!user) return;
@@ -127,6 +139,10 @@ function useFirebaseState() {
       ...src,
       id: crypto.randomUUID(),
       name: `${src.name} (copy)`,
+      order: projects.length,
+      accent: "#00000000", // transparent by default
+      label: "",           // optional tag (shown if present)
+      group: "",           // optional “project group”
       tasks,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -135,13 +151,15 @@ function useFirebaseState() {
     await setDoc(doc(db, `users/${user.uid}/projects/${clone.id}`), clone);
   }, [user, projects]);
 
+  // ✅ FIX: SAFE MERGE PATCH INTO DOC (NO UNDEFINED)
   const updateProject = useCallback(async (patch) => {
     if (!user || !patch?.id) return;
-    await updateDoc(doc(db, `users/${user.uid}/projects/${patch.id}`), {
-      ...patch,
-      updatedAt: serverTimestamp(),
-    });
+    const { id, ...rest } = patch;
+    const clean = pruneUndefined(rest);
+    if (!Object.keys(clean).length) return;
+    await updateDoc(doc(db, `users/${user.uid}/projects/${id}`), clean);
   }, [user]);
+
 
   const deleteProject = useCallback(async (id) => {
     if (!user) return;
@@ -161,16 +179,19 @@ function useFirebaseState() {
     await updateProject({ id: pid, tasks });
   }, [projects, updateProject]);
 
+  // ✅ FIX: ONLY PATCH THE TASKS ARRAY; NOTHING ELSE CHANGES
   const addSuggested = useCallback(async (pid) => {
-    const p = projects.find(x => x.id === pid); if (!p) return;
+    const p = projects.find(x => x.id === pid); 
+    if (!p) return;
     const tasks = [...(p.tasks || [])];
     SUGGESTED.forEach(st => {
       if (!tasks.some(t => t.title.toLowerCase() === st.toLowerCase())) {
         tasks.push({ id: crypto.randomUUID(), title: st, done: false });
       }
     });
-    await updateProject({ id: pid, tasks });
+    await updateProject({ id: pid, tasks }); // 👈 only tasks field gets updated
   }, [projects, updateProject]);
+
 
   const addLink = useCallback(async (pid) => {
     const p = projects.find(x => x.id === pid); if (!p) return;
@@ -213,9 +234,21 @@ function Brick({ p, user, onOpen, onToggleTask, onDelete, onClone, onColor }){
   const c1=p.color; const c2=shadeColor(p.color,-35);
   const stop=useCallback(e=>e.stopPropagation(),[]);
   const visibleTasks = useMemo(()=>{ const undone=(p.tasks||[]).filter(t=>!t.done); const done=(p.tasks||[]).filter(t=>t.done); return [...undone,...done].slice(0,4); },[p.tasks]);
+  
+  {p.label && (
+    <div className="absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded-full bg-black/40">
+      {p.label}
+    </div>
+  )}
 
   return (
-    <div onClick={()=>onOpen(p.id)} className="relative aspect-square rounded-2xl shadow-lg text-white overflow-hidden cursor-pointer transition-transform hover:-translate-y-0.5 hover:shadow-2xl bg-slate-900">
+    <div 
+      onClick={()=>onOpen(p.id)} 
+      className="relative aspect-square rounded-2xl shadow-lg text-white overflow-hidden cursor-pointer transition-transform hover:-translate-y-0.5 hover:shadow-2xl bg-slate-900"
+      style={{
+        boxShadow: p.accent ? `inset 0 0 0 3px ${p.accent}` : undefined
+      }}
+    >
       <div className="pointer-events-none absolute inset-0" style={{background:`linear-gradient(135deg, ${c1}aa, ${c2}ff)`}}/>
       <div className="pointer-events-none absolute inset-0 opacity-20 mix-blend-overlay" style={{backgroundImage:
         "radial-gradient(circle at 20% 20%, #ffffff22 2px, transparent 2px),"+
@@ -228,7 +261,9 @@ function Brick({ p, user, onOpen, onToggleTask, onDelete, onClone, onColor }){
           <div className="font-semibold text-base truncate">{p.name}</div>
         </div>
         <div className="mt-1 flex items-center gap-1 flex-wrap" onClick={stop}>
-          <span className="text-[11px] px-2 py-0.5 rounded-full bg-black/30">{["None","Low","Med","High"][p.priority??0]}</span>
+          <span className="text-[11px] px-2 py-0.5 rounded-full bg-black/30">
+            {["None","Low","Med","High"][Math.max(0, Math.min(3, p.priority ?? 0))]}
+          </span>
           <button disabled={!user} className="px-2 py-1 text-xs bg-white/15 hover:bg-white/25 rounded" onClick={(e)=>{e.stopPropagation(); onColor(p.id);}}>Color</button>
           <button disabled={!user} className="px-2 py-1 text-xs bg-white/15 hover:bg-white/25 rounded" onClick={(e)=>{e.stopPropagation(); onClone(p.id);}}>Copy</button>
           <button disabled={!user} className="px-2 py-1 text-xs bg-white/15 hover:bg-white/25 rounded text-red-200" onClick={(e)=>{e.stopPropagation(); onDelete(p.id);}}>Del</button>
@@ -243,12 +278,12 @@ function Brick({ p, user, onOpen, onToggleTask, onDelete, onClone, onColor }){
 
         {/* Links + Path */}
         <div className="flex flex-wrap gap-2 mt-2" onClick={stop}>
-          {(p.links||[]).slice(0,2).map((lnk,i)=> (
+          {(p.links||[]).slice(0,3).map((lnk,i)=> (
             <a key={lnk.url||i} href={lnk.url} target="_blank" rel="noreferrer" className="text-[11px] px-2 py-1 rounded-full bg-white/15 hover:bg-white/25 inline-flex items-center gap-1" onClick={stop}>🔗 {lnk.label||"Link"}</a>
           ))}
-          {p.path && (
+          {/* p.path && (
             <button className="text-[11px] px-2 py-1 rounded-full bg-white/15 hover:bg-white/25" onClick={(e)=>{e.stopPropagation(); tryOpenPath(p.path);}}>📁 Open</button>
-          )}
+          )*/}
         </div>
 
         {/* Tasks (undone first, highlighted) */}
@@ -277,7 +312,7 @@ function Modal({ open, onClose, children }){
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/50" onClick={onClose}/>
-      <div className="absolute inset-x-0 top-10 mx-auto w-[min(900px,94vw)] max-h-[80vh] overflow-y-auto rounded-xl bg-white shadow-xl p-4">
+      <div className="absolute inset-x-0 top-10 mx-auto w-[min(1800px,94vw)] max-h-[90vh] overflow-y-auto rounded-xl bg-white shadow-xl p-6">
         {children}
       </div>
     </div>
@@ -311,7 +346,7 @@ function ProjectEditor({ user, project, onClose, onSave, onDelete, onToggleTask,
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
         <div className="md:col-span-2 space-y-4">
           <div className="bg-slate-50 rounded-xl p-3">
             <div className="grid grid-cols-2 gap-3">
@@ -329,26 +364,59 @@ function ProjectEditor({ user, project, onClose, onSave, onDelete, onToggleTask,
                 <div className="text-sm mb-1">Short note</div>
                 <textarea value={draft.note||""} onChange={e=>set({note:e.target.value})} rows={2} className="w-full border rounded p-2"/>
               </div>
-              <div>
-                <div className="text-sm mb-1">Brick color</div>
-                <div className="flex items-center gap-2">
-                  <input type="color" value={draft.color} onChange={e=>set({color:e.target.value})} className="h-9 w-12 rounded"/>
-                  <button className="px-2 py-1 rounded bg-slate-200" onClick={()=>set({color: COLORS[(Math.random()*COLORS.length)|0]})}>Random</button>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-start">
+
+
+                {/* COLOR*/}
+                <div className="bg-gray-300 rounded-lg border p-3">
+                  <div className="text-sm mb-5">Color</div>
+                  <input type="color" value={draft.color} 
+                          onChange={e=>set({color:e.target.value})} 
+                          className="h-11 w-15 rounded"/>
+
+                {/*RANDOM COLOR - BUTTON*/}
+                <button 
+                  className="px-1 py-1 bg-gray-200 rounded-lg border p-2" 
+                  onClick={()=>set({color: COLORS[(Math.random()*COLORS.length)|0]})}>Random
+                </button>
                 </div>
-              </div>
-              <div className="col-span-2">
-                <div className="text-sm mb-1">Windows project path</div>
-                <div className="flex gap-2">
-                  <input value={draft.path||""} onChange={e=>set({path:e.target.value})} placeholder="C:\\Users\\you\\Music\\ProjectFolder" className="flex-1 border rounded p-2"/>
-                  <button className="px-2 py-1 rounded bg-slate-200" onClick={()=>tryOpenPath(draft.path)}>Open</button>
-                  <button className="px-2 py-1 rounded bg-slate-200" onClick={async()=>{ const ok = await copyToClipboard(draft.path||""); alert(ok?"Copied":"Copy failed"); }}>Copy</button>
+                
+                {/* STROKE*/}
+                <div className="bg-gray-300 rounded-lg border p-2">
+                  <div className="text-sm mb-20">Stroke</div>
+                  <input type="color" value={draft.accent || "#00000000"}
+                        onChange={e=>set({accent: e.target.value})}
+                        className="h-5 w-full border rounded" />
+                  </div>
+                <div>
+                {/* PROJECT LABEL */}
+                <div className="bg-gray-300 rounded-lg border p-2">
+                  <div className="text-sm mb-10">Label</div>
+                  <input value={draft.label || ""} 
+                        onChange={e=>set({label: e.target.value})}
+                        placeholder="Project tag (e.g. EP‑A)"
+                        className="w-full border rounded p-5" />
+                </div>
+                  </div>
+                  
+                {/* PROJECT GROUP (WIDE INPUT) */}
+                <div className="bg-gray-300 rounded-lg border p-2">
+                  <div className="text-sm mb-10">Project group</div>
+                  <input value={draft.group || ""} 
+                        onChange={e=>set({group: e.target.value})}
+                        placeholder="Group name (e.g. Album X)"
+                        className="w-full border rounded p-5" />
                 </div>
               </div>
             </div>
+
+
+            
             <div className="mt-3 text-xs text-slate-600 flex items-center justify-between"><span>{progress}% complete</span><span>Priority: {["None","Low","Med","High"][draft.priority??0]}</span></div>
             <div className="h-2 bg-slate-300 rounded mt-1 overflow-hidden"><div className="h-full bg-slate-800" style={{width:`${progress}%`}}/></div>
           </div>
-
+          {/*TASKS*/}
           <div className="bg-slate-50 rounded-xl p-3">
             <div className="text-sm mb-2 font-medium">Tasks</div>
             <div className="space-y-2">
@@ -366,7 +434,7 @@ function ProjectEditor({ user, project, onClose, onSave, onDelete, onToggleTask,
             </div>
           </div>
         </div>
-
+        {/*LINKS*/}
         <div className="space-y-4">
           <div className="bg-slate-50 rounded-xl p-3">
             <div className="text-sm mb-2 font-medium">Links</div>
@@ -391,6 +459,9 @@ export default function App(){
   // const [state, setState] = useAppState();
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState(null);
+  const [sortMode, setSortMode] = useState("order"); // "order" | "priority"
+  const [groupMode, setGroupMode] = useState("none"); // "none" | "project" | "priority"
+
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint:{ distance:6 } }));
   // const projects = state.projects;
 
@@ -403,13 +474,52 @@ export default function App(){
 
  
 
-  const filtered = useMemo(()=>{
-    const q=query.trim().toLowerCase();
-    const arr=q?projects.filter(p=>[p.name,p.type,p.note].join(" ").toLowerCase().includes(q)):projects;
-    return [...arr].sort((a,b)=>(b.priority??0)-(a.priority??0));
-  },[projects,query]);
-  const filteredIds = useMemo(()=> filtered.map(p=>p.id), [filtered]);
-  const xp = useMemo(()=>calcXP(projects),[projects]);
+  // ✅ FIX: KEEP MANUAL ORDER STABLE; SEARCH STILL WORKS
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const arr = q
+      ? projects.filter(p => [p.name, p.type, p.note].join(" ").toLowerCase().includes(q))
+      : projects;
+    if (sortMode === "priority") {
+      // Priority first (high→low), then stable by order
+      return arr.slice().sort((a,b) => (b.priority ?? 0) - (a.priority ?? 0) || (a.order ?? 0) - (b.order ?? 0));
+    }
+    // Manual mode
+    return arr.slice().sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
+  }, [projects, query, sortMode]);
+
+  // >>> ADD THIS
+  const filteredIds = useMemo(() => filtered.map(p => p.id), [filtered]);
+  const xp = useMemo(() => calcXP(projects), [projects]);
+  // <<< ADD THIS
+
+    // ✅ BUILD GROUPS FOR RENDERING (VISUAL SECTIONS)
+  const groups = useMemo(() => {
+    if (groupMode === "project") {
+      const map = new Map();
+      for (const p of filtered) {
+        const key = (p.group || "Ungrouped").trim() || "Ungrouped";
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(p);
+      }
+      return Array.from(map.entries()); // [ [groupName, projects[]], ... ]
+    }
+    if (groupMode === "priority") {
+      const label = (n)=>["None","Low","Med","High"][Math.max(0, Math.min(3, n ?? 0))];
+      const map = new Map();
+      for (const p of filtered) {
+        const key = label(p.priority);
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(p);
+      }
+      // High→Low→None for nicer order
+      const order = ["High","Med","Low","None"];
+      return order.filter(k => map.has(k)).map(k => [k, map.get(k)]);
+    }
+    // no grouping
+    return [["All", filtered]];
+  }, [filtered, groupMode]);
+
 
   // const addProject = useCallback(()=>{
   //  const p={ id:uid(), name:"New project", type:"", note:"", emoji: EMOJIS[(Math.random()*EMOJIS.length)|0], color: COLORS[(Math.random()*COLORS.length)|0], priority:2, path:"", links:[], tasks:[] };
@@ -424,10 +534,11 @@ export default function App(){
   // const addLink = useCallback((pid)=> setState(prev=>({ ...prev, projects: prev.projects.map(p=> p.id!==pid ? p : { ...p, links: [...(p.links||[]), {label:"Link", url:"https://"}] }) })),[setState]);
   // const changeColor = useCallback((pid)=> setState(prev=>({ ...prev, projects: prev.projects.map(p=> p.id!==pid ? p : { ...p, color: COLORS[(Math.random()*COLORS.length)|0] }) })),[setState]);
 
+  // >>> REPLACE onDragEnd WITH THIS
   const onDragEnd = useCallback(async (e) => {
     const { active, over } = e;
     if (!over || active.id === over.id) return;
-    if (query.trim()) return; // don't reorder while filtering
+    if (query.trim()) return; // don't reorder while filtered
 
     const ids = filtered.map(p => p.id);
     const oldIndex = ids.indexOf(active.id);
@@ -436,17 +547,18 @@ export default function App(){
 
     const reordered = arrayMove(filtered, oldIndex, newIndex);
 
-    // persist priorities so the priority sort reproduces this order
     try {
+      // PERSIST THE NEW ORDER INDEXES
       await Promise.all(
         reordered.map((p, i) =>
-          updateProject({ id: p.id, priority: reordered.length - i })
+          updateProject({ id: p.id, order: i }) // <<< WRITE order
         )
       );
     } catch (err) {
       console.error("Failed to persist order", err);
     }
   }, [filtered, query, updateProject]);
+  // <<< REPLACE END
 
 
 
@@ -459,7 +571,7 @@ export default function App(){
       const t2 = calcProjectProgress({tasks:[{done:true},{done:false},{done:true},{done:false}]}); console.assert(t2===50, 'progress 2/4');
       const xpT = calcXP([{tasks:[{done:true},{done:true}]},{tasks:[{done:false}]}]); console.assert(xpT.xp===20 && xpT.level>=1, 'xp calc');
       const sc = shadeColor('#336699', -20); console.assert(/^#[0-9a-fA-F]{6}$/.test(sc), 'shadeColor hex');
-      copyToClipboard(''); // should not throw
+      // copyToClipboard(''); // should not throw
     } catch {}
   },[]);
 
@@ -476,6 +588,19 @@ export default function App(){
             </div>
           </div>
 
+          <select
+            value={groupMode}
+            onChange={(e)=>setGroupMode(e.target.value)}
+            className="hidden md:block border rounded px-2 py-2 bg-white"
+            title="Grouping"
+          >
+            <option value="none">No grouping</option>
+            <option value="project">Group by project</option>
+            <option value="priority">Group by priority</option>
+          </select>
+
+
+
           <div className="flex items-center gap-2">
             {/* Search (desktop) */}
             {user && (
@@ -490,6 +615,16 @@ export default function App(){
                 </div>
               </div>
             )}
+
+          <select
+            value={sortMode}
+            onChange={(e)=>setSortMode(e.target.value)}
+            className="hidden md:block border rounded px-2 py-2 bg-white"
+          >
+            <option value="order">Manual order</option>
+            <option value="priority">Priority</option>
+          </select>
+
 
             {/* Actions */}
             {user && (
@@ -587,37 +722,48 @@ export default function App(){
               </div>
             </div>
 
-            {/* Bricks Grid */}
-            <div className="mt-6">
-              {filtered.length === 0 ? (
-                <div className="text-center py-20 text-slate-500">
-                  <p className="text-lg">No projects yet.</p>
-                  <p className="text-sm">
-                    Click <strong>New project</strong> to start a brick.
-                  </p>
-                </div>
-              ) : (
-                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-                  <SortableContext items={filteredIds} strategy={rectSortingStrategy}>
-                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 auto-rows-fr">
-                      {filtered.map((p) => (
-                        <SortableBrick key={p.id} id={p.id} span={1}>
-                          <Brick
-                            user={user}
-                            p={p}
-                            onOpen={setActiveId}
-                            onToggleTask={toggleTask}
-                            onDelete={deleteProject}
-                            onClone={cloneProject}
-                            onColor={changeColor}
-                          />
-                        </SortableBrick>
-                      ))}
+          {/* Bricks Grid */}
+          <div className="mt-6">
+            {filtered.length === 0 ? (
+              <div className="text-center py-20 text-slate-500">
+                <p className="text-lg">No projects yet.</p>
+                <p className="text-sm">
+                  Click <strong>New project</strong> to start a brick.
+                </p>
+              </div>
+            ) : (
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+                <SortableContext items={filteredIds} strategy={rectSortingStrategy}>
+                  {/* ✅ LOOP THROUGH GROUPS */}
+                  {groups.map(([title, items]) => (
+                    <div key={title} className="mt-6">
+                      {groupMode !== "none" && (
+                        <div className="text-sm font-medium text-slate-600 mb-2 px-1">
+                          {title}
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 auto-rows-fr">
+                        {items.map((p) => (
+                          <SortableBrick key={p.id} id={p.id} span={1}>
+                            <Brick
+                              user={user}
+                              p={p}
+                              onOpen={setActiveId}
+                              onToggleTask={toggleTask}
+                              onDelete={deleteProject}
+                              onClone={cloneProject}
+                              onColor={changeColor}
+                            />
+                          </SortableBrick>
+                        ))}
+                      </div>
                     </div>
-                  </SortableContext>
-                </DndContext>
-              )}
-            </div>
+                  ))}
+                </SortableContext>
+              </DndContext>
+            )}
+          </div>
+
           </>
         ) : (
           <div className="mt-10 text-center text-slate-600">
